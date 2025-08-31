@@ -8,13 +8,17 @@ with open('input.txt', 'r') as f:
 
 #hyperparameter
 torch.manual_seed(1337)
-batch_size = 32
-context_len= 8
+batch_size = 64
+context_len= 256
 iterations= 5000
-lr= 1e-3
+lr= 3e-4
 eval_iters= 200     #number of iterations for which evalution will occur on a sample from data
-eval_interval = 100     #number of iterations after which evaluation will start
-n_emb = 32
+eval_interval = 500     #number of iterations after which evaluation will start
+n_emb = 384
+num_head = 6
+n_layer = 6         #no. of times complete block iterates
+dropout = 0.2       #randomly drops some of the neurons preventing overfitting #trainign an emsemble of subnetworks 
+
 #enocder and decoder
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
@@ -59,7 +63,7 @@ class Head(nn.Module):
         self.query = nn.Linear(n_emb, head_size)
         self.value = nn.Linear(n_emb, head_size)
         self.register_buffer("tril" , torch.tril(torch.ones(context_len , context_len)))        #tril is not a parameter hence we are registering it as a buffer
-
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self,x):
         b , t , c = x.shape
@@ -71,6 +75,7 @@ class Head(nn.Module):
         wei =q @ k.transpose(-2,-1) * c**-0.5
         wei = wei.masked_fill(self.tril[:t, :t] == 0 , float("-inf"))   #we are adding [:t, :t] becuase we want in case where t < context_length=8(fixed)
         wei = F.softmax(wei, dim = -1)
+        wei = self.dropout(wei)
         out = wei @ v
         return out 
 
@@ -80,11 +85,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_head)])
         self.proj = nn.Linear(n_emb, n_emb)     #doubt --> why do we need to project again but we are already projecting in the feedforward network
-    
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self , x):
         
         out = torch.cat([h(x) for h in self.heads], dim=-1) 
-        out = self.proj(out)
+        out = self.dropout(self.proj(out))
         return  out  #concat over the last dimension so now we have more versatile features
                                                                     # what would happen if we concat over the second dimension
 class FeedForwardNetwork(nn.Module):
@@ -92,9 +98,10 @@ class FeedForwardNetwork(nn.Module):
     def __init__(self, n_emb):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_emb, n_emb), 
+            nn.Linear(n_emb, 4 * n_emb),    #why multiply by 4 
             nn.ReLU(),
-            nn.Linear(n_emb, n_emb),
+            nn.Linear(4 * n_emb, n_emb),        #again why
+            nn.Dropout(dropout),        #done before adding residual pathway (why)
             )
 
     def forward(self, x):
@@ -107,13 +114,22 @@ class Block(nn.Module):
         head_size = n_emb//num_head     #why are we dividing 
         self.mha = MultiHeadAttention(num_head, head_size)
         self.ffwn = FeedForwardNetwork(n_emb)
+        self.ln1 = nn.LayerNorm(n_emb)
+        self.ln2 = nn.LayerNorm(n_emb)
+
 
     def forward(self, x):
-        x = x + self.mha(x)         # adding residual connection for training deeper network
-        x = x + self.ffwn(x)
-        return x
-        
+        # x = self.ln1(x)           #this is post normalization because the residual connections are also getting nirmalized 
+        # x = x + self.mha(x)         # adding residual connection for training deeper network
+        # x = self.ln2(x)
+        # x = x + self.ffwn(x)
+        """ we would be using pre layer normalization where the residual wont't be normalized"""
+        x = x + self.mha(self.ln1(x))       #normalize the features
+        x = x + self.ffwn(self.ln2(x))
 
+        return x
+
+       
 #bigram_model
 class BigramLanguageModel(nn.Module):
     def __init__(self,vocab_size):
@@ -122,11 +138,14 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(context_len, n_emb)        #we need to project it into n_emb space becuase without projecting it, learning the affinity between token in vocab_dim is quite intensive, so we make it learn in the small dimension
         # self.sa_head = MultiHeadAttention(num_head=4 , head_size= n_emb//4)     #because after concatenating we would be getting a 4 times the n_emb , hence dividing it by 4(doubt) so that final is 32 which we wanted
         # self.ffn = FeedForwardNetwork(n_emb)        #making proj of single/per token to proj of the same token, self attention is like communication , now they want to think upon that data,by calculating weight
-        self.block = nn.Sequential(
-            Block(n_emb, num_head=4 ),      #(doubt)--> after one block the model has better vector of projection of one token in embedding space
-            Block(n_emb, num_head=4 ),
-            Block(n_emb, num_head=4 ),
-        )
+        # self.block = nn.Sequential(
+        #     Block(n_emb, num_head=4 ),      #(doubt)--> after one block the model has better vector of projection of one token in embedding space
+        #     Block(n_emb, num_head=4 ),
+        #     Block(n_emb, num_head=4 ),
+        #     nn.LayerNorm(n_emb),        #before projecting into dictionary ayer normailizaiton
+        # )
+        self.block = nn.Sequential(*[Block(n_emb, num_head=num_head ) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_emb)
         self.lm_head = nn.Linear(n_emb, vocab_size)
 
 
