@@ -78,6 +78,41 @@ class MultiHeadAttention(nn.Module):
     #running in parallel
     def __init__(self, num_head, head_size):
         super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_head)])
+        self.proj = nn.Linear(n_emb, n_emb)     #doubt --> why do we need to project again but we are already projecting in the feedforward network
+    
+    def forward(self , x):
+        
+        out = torch.cat([h(x) for h in self.heads], dim=-1) 
+        out = self.proj(out)
+        return  out  #concat over the last dimension so now we have more versatile features
+                                                                    # what would happen if we concat over the second dimension
+class FeedForwardNetwork(nn.Module):
+    """ to let the differernt heads talk to each other to accumulate the features of the other and add the non_linearity component"""
+    def __init__(self, n_emb):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_emb, n_emb), 
+            nn.ReLU(),
+            nn.Linear(n_emb, n_emb),
+            )
+
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+
+    def __init__(self, n_emb , num_head):
+        super().__init__()
+        head_size = n_emb//num_head     #why are we dividing 
+        self.mha = MultiHeadAttention(num_head, head_size)
+        self.ffwn = FeedForwardNetwork(n_emb)
+
+    def forward(self, x):
+        x = x + self.mha(x)         # adding residual connection for training deeper network
+        x = x + self.ffwn(x)
+        return x
+        
 
 #bigram_model
 class BigramLanguageModel(nn.Module):
@@ -85,16 +120,25 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb)        #n_emb is basically a projection into a dimension
         self.position_embedding_table = nn.Embedding(context_len, n_emb)        #we need to project it into n_emb space becuase without projecting it, learning the affinity between token in vocab_dim is quite intensive, so we make it learn in the small dimension
-        self.sa_head = Head(n_emb)
+        # self.sa_head = MultiHeadAttention(num_head=4 , head_size= n_emb//4)     #because after concatenating we would be getting a 4 times the n_emb , hence dividing it by 4(doubt) so that final is 32 which we wanted
+        # self.ffn = FeedForwardNetwork(n_emb)        #making proj of single/per token to proj of the same token, self attention is like communication , now they want to think upon that data,by calculating weight
+        self.block = nn.Sequential(
+            Block(n_emb, num_head=4 ),      #(doubt)--> after one block the model has better vector of projection of one token in embedding space
+            Block(n_emb, num_head=4 ),
+            Block(n_emb, num_head=4 ),
+        )
         self.lm_head = nn.Linear(n_emb, vocab_size)
+
 
     def forward(self, idx, targets=None): 
         b , t = idx.shape
         tok_emb = self.token_embedding_table(idx)   #(batch , time , channel)
         pos_emb = self.position_embedding_table(torch.arange(t))        #numbers arranged
         x = tok_emb + pos_emb       #broadcasting
-        sa = self.sa_head(x)        #whenever we write something like self.sa_head(x) , it's forward method is called
-        logits = self.lm_head(sa)  #( batch , time , vocab_size)
+        # sa = self.sa_head(x)        #whenever we write something like self.sa_head(x) , it's forward method is called
+        # ffn = self.ffn(sa)
+        x = self.block(x)       #doubt(how sequntail is calculated in blocks)
+        logits = self.lm_head(x)  #( batch , time , vocab_size)
         if targets is None:
             loss = None
         
@@ -135,3 +179,25 @@ for iter in range(iterations):
 
 context_idx = torch.zeros((1,1), dtype = torch.long)
 print(decode(model.generate(context_idx , max_new_tokens= 1000)[0].tolist()))
+ 
+
+##more head ()
+
+# Pros:
+# - More diverse attention patterns
+# - Better parallel processing
+# - Can capture different types of relationships
+
+# Cons:  
+# - Each head has less representational capacity
+# - Might miss complex patterns requiring more dimensions
+
+## fewer head ()
+
+# Pros:
+# - Each head can learn richer representations
+# - Better for complex pattern recognition
+
+# Cons:
+# - Less diversity in attention patterns
+# - Fewer parallel computations
